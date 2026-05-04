@@ -48,8 +48,9 @@ pip install -r requirements.txt
 
 Run the FastAPI server:
 ```bash
-uvicorn main:app --reload
+uvicorn main:app --reload --port 8005
 ```
+*(The backend is now configured to run on port 8005 by default to avoid conflicts).*
 *(Note: If your entry point is inside `app/`, you may need to run `uvicorn app.main:app --reload`)*
 
 ### 2. Frontend Setup
@@ -60,4 +61,4 @@ npm install
 npm run dev
 ```
 
-Your backend will be running at `http://localhost:8000` and the frontend at the Vite port (typically `http://localhost:5173`).
+Your backend will be running at `http://localhost:8005` and the frontend at the Vite port (typically `http://localhost:5173`).

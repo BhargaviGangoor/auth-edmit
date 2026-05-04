@@ -8,7 +8,7 @@ import {
   signOut
 } from 'firebase/auth';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://127.0.0.1:8005';
 
 function App() {
   const [step, setStep] = useState('email'); // email, otp, success

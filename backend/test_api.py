@@ -3,7 +3,7 @@ import sys
 
 def test():
     try:
-        url = "http://localhost:8000/request-otp"
+        url = "http://localhost:8005/request-otp"
         data = {"email": "bhargavirnsit@gmail.com"}
         response = requests.post(url, json=data)
         print(f"Status: {response.status_code}")
