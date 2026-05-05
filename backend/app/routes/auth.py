@@ -38,7 +38,11 @@ async def verify_firebase_token(
     
     user, is_new = AuthService.get_or_create_user(db, email, name, picture)
     
-    return AuthService.unified_auth_response(user, method="firebase", is_new=is_new)
+    # Check if user has passkey
+    from app.models.passkey import Passkey
+    has_passkey = db.query(Passkey).filter(Passkey.user_email == email).first() is not None
+    
+    return AuthService.unified_auth_response(user, method="firebase", is_new=is_new, has_passkey=has_passkey)
 
 @router.get("/callback")
 async def magic_link_callback(token: str, db: Session = Depends(get_db)):
@@ -48,7 +52,12 @@ async def magic_link_callback(token: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid or expired magic link")
     
     user, is_new = AuthService.get_or_create_user(db, email)
-    return AuthService.unified_auth_response(user, method="magic_link", is_new=is_new)
+    
+    # Check if user has passkey
+    from app.models.passkey import Passkey
+    has_passkey = db.query(Passkey).filter(Passkey.user_email == email).first() is not None
+    
+    return AuthService.unified_auth_response(user, method="magic_link", is_new=is_new, has_passkey=has_passkey)
 
 @router.post("/refresh")
 async def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):

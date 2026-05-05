@@ -71,4 +71,8 @@ async def verify_otp(
     # Get or create local user
     user, is_new = AuthService.get_or_create_user(db, payload.email)
     
-    return AuthService.unified_auth_response(user, method="otp", is_new=is_new)
+    # Check if user has passkey
+    from app.models.passkey import Passkey
+    has_passkey = db.query(Passkey).filter(Passkey.user_email == user.email).first() is not None
+    
+    return AuthService.unified_auth_response(user, method="otp", is_new=is_new, has_passkey=has_passkey)

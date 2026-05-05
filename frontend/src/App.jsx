@@ -38,7 +38,18 @@ window.onTurnstileExpired = () => {
 };
 
 function App() {
-  const [step, setStep] = useState('email'); // email, otp, success, onboarding
+  const [step, setStep] = useState(() => {
+    const savedUser = localStorage.getItem('user');
+    if (savedUser) {
+      try {
+        const parsed = JSON.parse(savedUser);
+        return parsed.onboarded ? 'success' : 'onboarding';
+      } catch (e) {
+        return 'email';
+      }
+    }
+    return 'email';
+  });
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
@@ -50,6 +61,8 @@ function App() {
   const [hasPasskey, setHasPasskey] = useState(false);
   
   const turnstileRef = useRef(null);
+  const passkeyRequestPendingRef = useRef(false);
+  const passkeyAbortControllerRef = useRef(null);
 
   // 1. Handle Magic Link Callback on mount
   useEffect(() => {
@@ -67,6 +80,7 @@ function App() {
     if (savedUser) {
       const parsed = JSON.parse(savedUser);
       setUser(parsed);
+      setHasPasskey(parsed.has_passkey || false);
       if (!parsed.onboarded) setStep('onboarding');
       else setStep('success');
     }
@@ -88,13 +102,30 @@ function App() {
     };
   }, []);
 
+  // Conditional UI (Passkey Autofill)
+  useEffect(() => {
+    if (step === 'email') {
+      const triggerConditionalUI = async () => {
+        if (window.PublicKeyCredential && 
+            PublicKeyCredential.isConditionalMediationAvailable) {
+          const available = await PublicKeyCredential.isConditionalMediationAvailable();
+          if (available) {
+            console.log("Conditional UI available, starting...");
+            handlePasskeyLogin(true);
+          }
+        }
+      };
+      triggerConditionalUI();
+    }
+  }, [step]);
+
   // Auto-redirect on success
   useEffect(() => {
     if (step === 'success' && !loading) {
       const timer = setTimeout(() => {
         console.log("Auto-redirecting to edmitted.org...");
         window.location.href = "https://edmitted.org";
-      }, 5000);
+      }, 3000);
       return () => clearTimeout(timer);
     }
   }, [step, loading]);
@@ -127,6 +158,7 @@ function App() {
     setUser(user);
     setEmail(user.email);
     setIsNewUser(is_new_user);
+    setHasPasskey(user.has_passkey || false);
     
     if (is_new_user || !user.onboarded) {
       setStep('onboarding');
@@ -254,27 +286,65 @@ function App() {
   };
 
   // Passkey Login
-  const handlePasskeyLogin = async () => {
-    if (!email) {
-      setError("Please enter your email first to find your passkey.");
+  const handlePasskeyLogin = async (isConditional = false) => {
+    // If user manually clicks the button, abort the background conditional UI request
+    if (!isConditional && passkeyAbortControllerRef.current) {
+      console.log("Aborting conditional passkey request for manual request...");
+      passkeyAbortControllerRef.current.abort();
+      passkeyAbortControllerRef.current = null;
+      passkeyRequestPendingRef.current = false;
+    }
+
+    if (passkeyRequestPendingRef.current) {
+      console.log("Passkey request already pending, skipping...");
       return;
     }
-    setLoading(true);
-    setError('');
+
+    if (!isConditional) {
+      setLoading(true);
+      setError('');
+    }
+    
+    const abortController = new AbortController();
+    if (isConditional) {
+      passkeyAbortControllerRef.current = abortController;
+    }
+
+    passkeyRequestPendingRef.current = true;
     try {
       const startRes = await fetch(`${API_BASE}/passkey/login/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email: email || null }),
       });
       const options = await startRes.json();
+
+      if (!startRes.ok) {
+        console.error("Passkey login start failed:", options);
+        if (!isConditional) {
+          setError(typeof options.detail === 'string' ? options.detail : "Validation error on server");
+        }
+        return;
+      }
       
       // Convert challenge
       options.publicKey.challenge = base64ToBuffer(options.publicKey.challenge);
-      options.publicKey.allowCredentials.forEach(c => c.id = base64ToBuffer(c.id));
+      if (options.publicKey.allowCredentials) {
+        options.publicKey.allowCredentials.forEach(c => c.id = base64ToBuffer(c.id));
+      }
+
+      // Add mediation for autofill support
+      if (isConditional) {
+        options.mediation = 'conditional';
+      }
       
+      options.signal = abortController.signal;
+      
+      console.log("Requesting credential with options:", options);
       const assertion = await navigator.credentials.get(options);
       
+      if (!assertion) return;
+
       const response = {
         id: assertion.id,
         rawId: bufferToBase64(assertion.rawId),
@@ -290,20 +360,40 @@ function App() {
       const finishRes = await fetch(`${API_BASE}/passkey/login/finish`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, response }),
+        body: JSON.stringify({ 
+          email: email || null, 
+          challengeId: options.challengeId,
+          response 
+        }),
       });
       
       const data = await finishRes.json();
       if (finishRes.ok) {
         handleAuthSuccess(data);
       } else {
-        setError(data.detail || "Passkey login failed");
+        if (!isConditional) {
+          setError(data.detail || "Passkey login failed");
+          // If passkey not found, help them sign in with email
+          if (data.detail === "Passkey not recognized" || data.detail === "Passkey mismatch") {
+            setTimeout(() => setStep('email'), 2000);
+          }
+        }
       }
     } catch (err) {
-      console.error(err);
-      setError("Passkey login failed.");
+      if (err.name === 'AbortError') {
+        console.log("Passkey request aborted.");
+        return;
+      }
+      console.error("Passkey login error:", err);
+      if (!isConditional) {
+        setError("Passkey login failed. If you don't have an account, please sign in with email first.");
+        // Redirect to email step after a short delay so they can see the error
+        setTimeout(() => setStep('email'), 3000);
+      }
     } finally {
-      setLoading(false);
+      passkeyRequestPendingRef.current = false;
+      if (isConditional) passkeyAbortControllerRef.current = null;
+      if (!isConditional) setLoading(false);
     }
   };
 
@@ -377,7 +467,7 @@ function App() {
       <div className="card">
         {step === 'email' && (
           <div className="auth-step-container">
-            <button type="button" className="btn btn-passkey" onClick={handlePasskeyLogin} disabled={loading} style={{ marginBottom: '1.5rem' }}>
+            <button type="button" className="btn btn-passkey" onClick={() => handlePasskeyLogin()} disabled={loading} style={{ marginBottom: '1.5rem' }}>
               <Fingerprint size={18} /> Sign in with Passkey
             </button>
 
@@ -391,10 +481,12 @@ function App() {
                 <div className="input-wrapper">
                   <input
                     type="email"
+                    name="username"
                     className="input-field"
                     placeholder="name@edmitted.org"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    autoComplete="username webauthn"
                     required
                   />
                 </div>

@@ -14,9 +14,20 @@ A premium, passwordless authentication platform featuring **Email OTP**, **Googl
 - **Destination**: Automatic redirection to `edmitted.org`.
 
 ### 2. The Returning User (Fast-Track)
-- **Biometric Entry**: User clicks "Sign in with Passkey."
-- **Instant Auth**: User touches their fingerprint sensor; the backend verifies the device signature.
-- **Zero Friction**: No email, no codes, no passwords. Instant redirection to the dashboard.
+- **Direct Entry**: User clicks **"Sign in with Passkey"** immediately—no email required.
+- **Autofill (Conditional UI)**: When the user clicks the email field, the browser automatically suggests their passkey for an instant login.
+- **Biometric Auth**: User verifies their identity (Fingerprint, FaceID, or PIN) through their OS.
+- **Zero Friction**: Instant redirection to the dashboard in under 3 seconds.
+
+---
+
+## 🛠️ Advanced Passkey Features
+
+- **Conditional UI Support**: Implemented `mediation: 'conditional'` allowing browsers to provide passkey suggestions directly in the email input field.
+- **Concurrency Protection**: Added a locking mechanism to prevent "request already pending" errors during concurrent WebAuthn operations.
+- **Manual Overrides**: Integrated `AbortController` to allow manual button clicks to cancel and take priority over background autofill checks.
+- **Stateless Challenge Tracking**: Implemented `challengeId` tracking to correctly match WebAuthn challenges across multiple tabs and sessions.
+- **Instant Session Restore**: Optimized state initialization to detect existing `localStorage` sessions instantly, preventing UI flashes.
 
 ---
 

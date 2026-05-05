@@ -36,7 +36,7 @@ class AuthService:
             return None
 
     @staticmethod
-    def unified_auth_response(user: User, method: str, is_new: bool = False):
+    def unified_auth_response(user: User, method: str, is_new: bool = False, has_passkey: bool = False):
         """Format a consistent response for all auth methods, including JWTs."""
         # Generate JWT Tokens
         user_data = {"sub": user.email, "email": user.email}
@@ -57,6 +57,7 @@ class AuthService:
                 "picture": user.picture,
                 "role": user.role,
                 "onboarded": user.onboarded,
+                "has_passkey": has_passkey,
                 "created_at": user.created_at.isoformat()
             }
         }

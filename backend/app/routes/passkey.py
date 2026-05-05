@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel
+from typing import Optional
 from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.models.passkey import Passkey
@@ -29,8 +30,12 @@ router = APIRouter(prefix="/passkey", tags=["Passkey"])
 class PasskeyEmailRequest(BaseModel):
     email: str
 
+class PasskeyLoginStartRequest(BaseModel):
+    email: Optional[str] = None
+
 class PasskeyFinishRequest(BaseModel):
-    email: str
+    email: Optional[str] = None
+    challengeId: Optional[str] = None
     response: dict
 
 # Simple in-memory storage for challenges (Use Redis in production!)
@@ -91,73 +96,107 @@ async def register_finish(
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/login/start")
-async def login_start(payload: PasskeyEmailRequest, db: Session = Depends(get_db)):
+async def login_start(payload: dict = Body(...), db: Session = Depends(get_db)):
     """Start Passkey login."""
-    email = payload.email
-    passkeys = db.query(Passkey).filter(Passkey.user_email == email).all()
-    if not passkeys:
-        raise HTTPException(status_code=400, detail="No passkeys registered for this email")
-    
-    # Reconstruct AttestedCredentialData for fido2
+    email = payload.get("email")
     credentials = []
-    for p in passkeys:
-        # This is a bit simplified, usually you'd store more info
-        # But for MVP we'll try to reconstruct or just use the ID
-        pass # fido2 can work with just the ID for authenticate_begin
     
-    # fido2 authenticate_begin expects a list of registered credentials
-    # but for simple verification, we can just start and then verify against the DB
-    auth_data, state = passkey_service.server.authenticate_begin([
-        AttestedCredentialData.create(
-            websafe_decode(p.credential_id), 
-            cbor.decode(p.public_key),
-            b"" # AAGUID
-        ) for p in passkeys
-    ])
+    if email:
+        passkeys = db.query(Passkey).filter(Passkey.user_email == email).all()
+        if passkeys:
+            credentials = [
+                AttestedCredentialData.create(
+                    b"\0" * 16,
+                    websafe_decode(p.credential_id), 
+                    cbor.decode(p.public_key)
+                ) for p in passkeys
+            ]
     
-    challenge_store[email] = state
+    # fido2 authenticate_begin([]) allows discoverable credentials
+    auth_data, state = passkey_service.server.authenticate_begin(credentials)
+    
+    # Get the challenge bytes from the auth_data
+    challenge_bytes = auth_data['publicKey']['challenge']
+    if isinstance(challenge_bytes, str):
+        challenge_bytes = challenge_bytes.encode()
+        
+    # Store state by challenge to handle discoverable login where email isn't known yet
+    challenge_id = websafe_encode(challenge_bytes)
+    challenge_store[challenge_id] = state
+    
+    if email:
+        challenge_store[email] = state
+        
     return json_serializable({
-        "publicKey": auth_data["publicKey"]
+        "publicKey": auth_data["publicKey"],
+        "challengeId": challenge_id
     })
 
 @router.post("/login/finish")
 async def login_finish(
-    payload: PasskeyFinishRequest,
+    payload: dict = Body(...),
     db: Session = Depends(get_db)
 ):
     """Complete Passkey login."""
-    email = payload.email
-    response = payload.response
-    state = challenge_store.get(email)
-    if not state:
-        raise HTTPException(status_code=400, detail="Challenge not found")
+    email = payload.get("email")
+    challenge_id = payload.get("challengeId")
+    response = payload.get("response")
     
-    passkeys = db.query(Passkey).filter(Passkey.user_email == email).all()
+    state = None
+    if challenge_id:
+        state = challenge_store.get(challenge_id)
+    if not state and email:
+        state = challenge_store.get(email)
+        
+    if not state:
+        raise HTTPException(status_code=400, detail="Challenge not found or expired")
+    
+    # Identify which credential was used
+    cred_id_encoded = response.get('id')
+    if not cred_id_encoded:
+        raise HTTPException(status_code=400, detail="Credential ID missing")
+        
+    db_passkey = db.query(Passkey).filter(Passkey.credential_id == cred_id_encoded).first()
+    if not db_passkey:
+        raise HTTPException(status_code=401, detail="Passkey not recognized")
+    
+    if not email:
+        email = db_passkey.user_email
+    elif email != db_passkey.user_email:
+        raise HTTPException(status_code=401, detail="Passkey mismatch")
+
     credentials = [
         AttestedCredentialData.create(
-            websafe_decode(p.credential_id), 
-            cbor.decode(p.public_key),
-            b""
-        ) for p in passkeys
+            b"\0" * 16,
+            websafe_decode(db_passkey.credential_id), 
+            cbor.decode(db_passkey.public_key)
+        )
     ]
     
     try:
         # Verify
         auth_data = passkey_service.finish_authentication(state, credentials, response)
         
-        # Update sign count
-        # Find which passkey was used
-        cred_id = websafe_encode(auth_data.credential_data.credential_id)
-        db_passkey = db.query(Passkey).filter(Passkey.credential_id == cred_id).first()
-        if db_passkey:
-            db_passkey.sign_count = auth_data.counter
-            db.commit()
+        # Update sign count (handle different fido2 versions)
+        new_counter = None
+        if hasattr(auth_data, 'counter'):
+            new_counter = auth_data.counter
+        elif hasattr(auth_data, 'authenticator_data') and hasattr(auth_data.authenticator_data, 'counter'):
+            new_counter = auth_data.authenticator_data.counter
+            
+        if new_counter is not None:
+            db_passkey.sign_count = new_counter
+            
+        db.commit()
             
         # Authenticate user
         user = db.query(User).filter(User.email == email).first()
-        del challenge_store[email]
         
-        return AuthService.unified_auth_response(user, method="passkey")
+        # Cleanup
+        if challenge_id: challenge_store.pop(challenge_id, None)
+        if email: challenge_store.pop(email, None)
+        
+        return AuthService.unified_auth_response(user, method="passkey", has_passkey=True)
     except Exception as e:
         print(f"Login error: {e}")
         raise HTTPException(status_code=401, detail="Passkey verification failed")
