@@ -1,13 +1,14 @@
 # Edmitted Unified Authentication System
 
-A premium, passwordless authentication platform featuring **Email OTP/Magic Links**, **Google OAuth**, and **WebAuthn (Passkeys)** biometrics.
+A premium, passwordless authentication platform featuring **Email OTP**, **Google OAuth**, and **WebAuthn (Passkeys)** biometrics.
 
 ## 🚀 The User Journeys
 
 ### 1. The New User (Onboarding)
-- **Entry**: User enters their email address.
+- **Entry**: User enters their email address OR clicks **"Continue with Google"**.
 - **Bot Protection**: Cloudflare Turnstile verifies the user silently.
-- **Verification**: User receives a 6-digit OTP or a Magic Link in their inbox.
+- **Verification (Email)**: User receives a 6-digit OTP in their inbox to verify their identity.
+- **Verification (Google)**: User selects their Google account; the system automatically merges or creates their Edmitted account.
 - **Identity**: Upon first login, the user completes a brief onboarding (Name & Role).
 - **Security Upgrade**: User is prompted to "Enable Passkey" to register their fingerprint/FaceID for future visits.
 - **Destination**: Automatic redirection to `edmitted.org`.
@@ -24,12 +25,14 @@ A premium, passwordless authentication platform featuring **Email OTP/Magic Link
 ### Backend (FastAPI + Python)
 - **`fastapi`**: Modern web framework with Pydantic validation.
 - **`fido2`**: The core engine for WebAuthn/Passkey handshakes.
+- **`firebase-admin`**: Handles secure verification of Google OAuth tokens.
 - **`python-jose`**: Handles stateless JWT session management (`access_token` & `refresh_token`).
 - **`sqlalchemy`**: Database ORM (SQLite for local dev, PostgreSQL ready).
 - **`slowapi`**: Implements rate-limiting on sensitive OTP endpoints.
 - **`cbor2`**: Used for encoding complex security keys into database-friendly formats.
 
 ### Frontend (React + Vite)
+- **`firebase`**: Managed Google Authentication popup and tokens.
 - **`lucide-react`**: Beautiful, consistent iconography.
 - **`canvas-confetti`**: For that premium "Success" celebration.
 - **`Cloudflare Turnstile`**: Privacy-first, non-intrusive CAPTCHA.
@@ -38,8 +41,8 @@ A premium, passwordless authentication platform featuring **Email OTP/Magic Link
 
 ## 🧠 Technical Logic (Handover Notes)
 
-### 1. Identity Merging
-The system uses **Email Address** as the primary unique identifier. Whether a user authenticates via Google, OTP, or Passkey, they are always linked to the same record in the `users` table.
+### 1. Identity Merging (Email & GAuth)
+The system uses **Email Address** as the primary unique identifier. Whether a user authenticates via Google, OTP, or Passkey, they are always linked to the same record in the `users` table. This prevents duplicate accounts if a user switches login methods.
 
 ### 2. Passkey Serialization (Critical)
 The `fido2` library uses raw bytes and complex objects that don't serialize to JSON by default.
