@@ -9,3 +9,5 @@ slowapi
 passlib[bcrypt]
 google-auth
 requests
+python-jose[cryptography]
+fido2

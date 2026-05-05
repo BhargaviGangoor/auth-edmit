@@ -10,8 +10,8 @@ class EmailService:
         self.smtp_server = "smtp.gmail.com"
         self.smtp_port = 587
 
-    def send_otp_email(self, to_email: str, otp: str) -> bool:
-        """Send a 6-digit OTP to the user's email using Gmail SMTP."""
+    def send_otp_email(self, to_email: str, otp: str, magic_token: str = None) -> bool:
+        """Send a 6-digit OTP and optional magic link to the user's email."""
         if not self.sender_email or not self.sender_password:
             print("SMTP Error: Credentials not configured.")
             return False
@@ -22,7 +22,14 @@ class EmailService:
             msg['To'] = to_email
             msg['Subject'] = 'Your OTP Code'
             
-            body = f"Your one-time password is: {otp}\nThis code will expire in 5 minutes.\nIf you didn't request this code, you can safely ignore this email."
+            body = f"Your one-time password is: {otp}\n\n"
+            if magic_token:
+                # Assuming frontend is on port 5173 for dev
+                frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+                magic_link = f"{frontend_url}/auth/callback?token={magic_token}"
+                body += f"Alternatively, click this link to login instantly:\n{magic_link}\n\n"
+            
+            body += "This code and link will expire in 5 minutes.\nIf you didn't request this, you can safely ignore this email."
             msg.set_content(body)
 
             context = ssl.create_default_context()

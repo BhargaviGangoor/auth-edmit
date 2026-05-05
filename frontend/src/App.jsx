@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Mail, ShieldCheck, ArrowRight, CheckCircle2, AlertCircle, ArrowLeft, LogOut, User as UserIcon, Lock } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Mail, ShieldCheck, ArrowRight, CheckCircle2, AlertCircle, ArrowLeft, LogOut, User as UserIcon, Lock, GraduationCap, Users, Fingerprint } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { auth, googleProvider } from './firebaseConfig';
 import { 
@@ -8,83 +8,161 @@ import {
   signOut
 } from 'firebase/auth';
 
-const API_BASE = 'http://127.0.0.1:8005';
+const API_BASE = 'http://localhost:8005';
+
+// Helper for WebAuthn binary data
+const bufferToBase64 = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)))
+  .replace(/\+/g, "-")
+  .replace(/\//g, "_")
+  .replace(/=/g, "");
+
+const base64ToBuffer = (base64) => {
+  const binary = atob(base64.replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(binary, c => c.charCodeAt(0));
+};
+
+// Global Turnstile Callback
+window.onTurnstileSuccess = (token) => {
+  console.log("Turnstile global verified:", token.substring(0, 10) + "...");
+  window.dispatchEvent(new CustomEvent('captcha-verified', { detail: token }));
+};
+
+window.onTurnstileError = (code) => {
+  console.error("Turnstile error:", code);
+  window.dispatchEvent(new CustomEvent('captcha-error', { detail: code }));
+};
+
+window.onTurnstileExpired = () => {
+  console.warn("Turnstile expired");
+  window.dispatchEvent(new CustomEvent('captcha-expired'));
+};
 
 function App() {
-  const [step, setStep] = useState('email'); // email, otp, success
+  const [step, setStep] = useState('email'); // email, otp, success, onboarding
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [user, setUser] = useState(null);
-  const [debugOtp, setDebugOtp] = useState('');
+  const [isNewUser, setIsNewUser] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState('');
+  const [onboardingData, setOnboardingData] = useState({ name: '', role: 'student' });
+  const [hasPasskey, setHasPasskey] = useState(false);
+  
+  const turnstileRef = useRef(null);
 
-  // 1. Handle Persistence on mount
+  // 1. Handle Magic Link Callback on mount
   useEffect(() => {
-    // Handle session persistence
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser && !user) {
-        const idToken = await firebaseUser.getIdToken();
-        try {
-          const res = await fetch(`${API_BASE}/verify-firebase-token`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: idToken }),
-          });
-          const data = await res.json();
-          if (res.ok) {
-            setUser(data.user);
-            setStep('success');
-          }
-        } catch (e) {
-          console.error("Session persistence failed");
-        }
-      }
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    if (token) {
+      handleMagicLinkAuth(token);
+    }
+
+    // Load user and email from localStorage if available
+    const savedUser = localStorage.getItem('user');
+    const savedEmail = localStorage.getItem('email');
+    if (savedEmail) setEmail(savedEmail);
+    
+    if (savedUser) {
+      const parsed = JSON.parse(savedUser);
+      setUser(parsed);
+      if (!parsed.onboarded) setStep('onboarding');
+      else setStep('success');
+    }
+
+    // Listen for global captcha event
+    const handleCaptcha = (e) => {
+      console.log("App received captcha token");
+      setCaptchaToken(e.detail);
+    };
+    window.addEventListener('captcha-verified', handleCaptcha);
+    window.addEventListener('captcha-error', (e) => setError(`CAPTCHA Error: ${e.detail}. Check if you added 'localhost' to Cloudflare.`));
+    window.addEventListener('captcha-expired', () => {
+      setCaptchaToken('');
+      setError('CAPTCHA expired. Please verify again.');
     });
-    return () => unsubscribe();
-  }, [user]);
 
-  // 2. Auth Success Handler
-  const handleAuthSuccess = (userData) => {
-    setUser(userData);
-    setStep('success');
-    confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
-    setTimeout(() => { window.location.href = 'https://edmitted.org'; }, 2500);
-  };
+    return () => {
+      window.removeEventListener('captcha-verified', handleCaptcha);
+    };
+  }, []);
 
-  // 3. Backend Verifiers
-  const verifyFirebaseWithBackend = async (idToken) => {
+  // Auto-redirect on success
+  useEffect(() => {
+    if (step === 'success' && !loading) {
+      const timer = setTimeout(() => {
+        console.log("Auto-redirecting to edmitted.org...");
+        window.location.href = "https://edmitted.org";
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [step, loading]);
+
+  const handleMagicLinkAuth = async (token) => {
+    setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/verify-firebase-token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: idToken }),
-      });
+      const res = await fetch(`${API_BASE}/auth/callback?token=${token}`);
       const data = await res.json();
-      if (res.ok) handleAuthSuccess(data.user);
-      else setError(data.detail || 'Verification failed.');
-    } catch (err) { setError('Backend connection error.'); }
-    finally { setLoading(false); }
+      if (res.ok) {
+        handleAuthSuccess(data);
+        window.history.replaceState({}, document.title, "/");
+      } else {
+        setError(data.detail || 'Magic link failed.');
+      }
+    } catch (err) {
+      setError('Connection error.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  // 4. Action Handlers
+  const handleAuthSuccess = (data) => {
+    const { user, access_token, refresh_token, is_new_user } = data;
+    localStorage.setItem('access_token', access_token);
+    localStorage.setItem('refresh_token', refresh_token);
+    localStorage.setItem('user', JSON.stringify(user));
+    localStorage.setItem('email', user.email);
+    
+    setUser(user);
+    setEmail(user.email);
+    setIsNewUser(is_new_user);
+    
+    if (is_new_user || !user.onboarded) {
+      setStep('onboarding');
+    } else {
+      setStep('success');
+      confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+    }
+  };
+
   const handleEmailSubmitted = async (e) => {
     e.preventDefault();
+    
+    // In development, we allow skipping the CAPTCHA if it's stuck
+    if (!captchaToken) {
+      console.warn("CAPTCHA not verified. Proceeding anyway because we are in development.");
+    }
+    
     setLoading(true);
     setError('');
     try {
       const res = await fetch(`${API_BASE}/otp/send-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, captcha_token: captchaToken }),
       });
       const data = await res.json();
       if (res.ok) {
         setStep('otp');
-        if (data.otp_test) setDebugOtp(data.otp_test);
-      } else setError(data.detail || 'Failed to send OTP.');
-    } catch (err) { setError('Backend unreachable.'); }
-    finally { setLoading(false); }
+      } else {
+        setError(data.detail || 'Failed to send login link.');
+      }
+    } catch (err) {
+      setError('Backend unreachable.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleVerifyOtp = async (e) => {
@@ -97,28 +175,201 @@ function App() {
         body: JSON.stringify({ email, otp }),
       });
       const data = await res.json();
-      if (res.ok) handleAuthSuccess(data.user);
-      else setError(data.detail || 'Invalid code.');
-    } catch (err) { setError('Verification failed.'); }
-    finally { setLoading(false); }
+      if (res.ok) {
+        handleAuthSuccess(data);
+      } else {
+        setError(data.detail || 'Invalid code.');
+      }
+    } catch (err) {
+      setError('Verification failed.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleGoogleLogin = async () => {
+  // Passkey Registration
+  const handleRegisterPasskey = async () => {
+    let userEmail = user?.email || email || localStorage.getItem('email');
+    
+    if (!userEmail) {
+      userEmail = prompt("Please confirm your email address to enable Passkey:");
+    }
+    
+    if (!userEmail) return; // User cancelled prompt
+
+    setLoading(true);
+    setError('');
+    try {
+      const payload = { email: userEmail };
+      console.log("Submitting passkey register payload:", payload);
+      
+      const startRes = await fetch(`${API_BASE}/passkey/register/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const options = await startRes.json();
+      
+      if (!options.publicKey) {
+        console.error("Backend returned invalid options:", options);
+        throw new Error(options.detail || "Failed to start registration");
+      }
+
+      // Convert options for navigator.credentials.create
+      options.publicKey.challenge = base64ToBuffer(options.publicKey.challenge);
+      options.publicKey.user.id = base64ToBuffer(options.publicKey.user.id);
+      
+      const credential = await navigator.credentials.create(options);
+      
+      // Convert credential for backend
+      const response = {
+        id: credential.id,
+        rawId: bufferToBase64(credential.rawId),
+        type: credential.type,
+        response: {
+          attestationObject: bufferToBase64(credential.response.attestationObject),
+          clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+        },
+      };
+
+      const finishRes = await fetch(`${API_BASE}/passkey/register/finish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: userEmail, response }),
+      });
+      
+      if (finishRes.ok) {
+        alert("Passkey enabled successfully!");
+        setHasPasskey(true);
+      } else {
+        const errorData = await finishRes.json();
+        setError(errorData.detail || "Registration failed");
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Passkey setup failed.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Passkey Login
+  const handlePasskeyLogin = async () => {
+    if (!email) {
+      setError("Please enter your email first to find your passkey.");
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const startRes = await fetch(`${API_BASE}/passkey/login/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const options = await startRes.json();
+      
+      // Convert challenge
+      options.publicKey.challenge = base64ToBuffer(options.publicKey.challenge);
+      options.publicKey.allowCredentials.forEach(c => c.id = base64ToBuffer(c.id));
+      
+      const assertion = await navigator.credentials.get(options);
+      
+      const response = {
+        id: assertion.id,
+        rawId: bufferToBase64(assertion.rawId),
+        type: assertion.type,
+        response: {
+          authenticatorData: bufferToBase64(assertion.response.authenticatorData),
+          clientDataJSON: bufferToBase64(assertion.response.clientDataJSON),
+          signature: bufferToBase64(assertion.response.signature),
+          userHandle: assertion.response.userHandle ? bufferToBase64(assertion.response.userHandle) : null,
+        },
+      };
+
+      const finishRes = await fetch(`${API_BASE}/passkey/login/finish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, response }),
+      });
+      
+      const data = await finishRes.json();
+      if (finishRes.ok) {
+        handleAuthSuccess(data);
+      } else {
+        setError(data.detail || "Passkey login failed");
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Passkey login failed.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOnboardingSubmit = async (e) => {
+    e.preventDefault();
+    const userEmail = user?.email || email || localStorage.getItem('email');
+    if (!userEmail) {
+      setError("Please verify your email address below to continue.");
+      return;
+    }
+    const payload = { ...onboardingData, email: userEmail };
+    console.log("Submitting onboarding payload:", payload);
+    
     setLoading(true);
     try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const idToken = await result.user.getIdToken();
-      await verifyFirebaseWithBackend(idToken);
-    } catch (err) { setError('Google Sign-In failed.'); }
-    finally { setLoading(false); }
+      const res = await fetch(`${API_BASE}/auth/onboarding`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        const updatedUser = { ...user, ...onboardingData, onboarded: true };
+        setUser(updatedUser);
+        localStorage.setItem('user', JSON.stringify(updatedUser));
+        setStep('success');
+        confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+      } else {
+        setError('Failed to save onboarding info.');
+      }
+    } catch (err) {
+      setError('Connection error.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleLogout = async () => {
-    await signOut(auth);
+  const handleLogout = () => {
+    localStorage.clear();
     setUser(null);
     setStep('email');
     setEmail('');
     setOtp('');
+  };
+
+  const handleGoogleLogin = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      const idToken = await result.user.getIdToken();
+      const res = await fetch(`${API_BASE}/auth/verify-firebase-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: idToken }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        handleAuthSuccess(data);
+      } else {
+        setError(data.detail || 'Google Sign-In failed.');
+      }
+    } catch (err) {
+      setError('Google Sign-In failed.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -126,10 +377,14 @@ function App() {
       <div className="card">
         {step === 'email' && (
           <div className="auth-step-container">
+            <button type="button" className="btn btn-passkey" onClick={handlePasskeyLogin} disabled={loading} style={{ marginBottom: '1.5rem' }}>
+              <Fingerprint size={18} /> Sign in with Passkey
+            </button>
+
             <form onSubmit={handleEmailSubmitted}>
               <div className="header">
-                <h1>Welcome</h1>
-                <p>Enter your email to get started</p>
+                <h1>Welcome to Edmitted</h1>
+                <p>Sign in or create your account instantly</p>
               </div>
               <div className="input-group">
                 <label className="input-label">Email Address</label>
@@ -137,17 +392,28 @@ function App() {
                   <input
                     type="email"
                     className="input-field"
-                    placeholder="name@company.com"
+                    placeholder="name@edmitted.org"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     required
                   />
                 </div>
               </div>
+              
+              <div 
+                className="cf-turnstile" 
+                data-sitekey="0x4AAAAAADJf0jX9daW5O7pM" 
+                data-callback="onTurnstileSuccess"
+                data-error-callback="onTurnstileError"
+                data-expired-callback="onTurnstileExpired"
+                style={{ marginBottom: '1rem' }}
+              ></div>
+
               <button type="submit" className="btn" disabled={loading}>
-                {loading ? <div className="loading-spinner" /> : <><ShieldCheck size={18} /> Continue with Code</>}
+                {loading ? <div className="loading-spinner" /> : <><ShieldCheck size={18} /> Continue with Email</>}
               </button>
             </form>
+
             {error && <div className="error-message" style={{ marginTop: '1rem' }}><AlertCircle size={14} /> {error}</div>}
             
             <div className="divider"><span>or</span></div>
@@ -168,8 +434,8 @@ function App() {
             <form onSubmit={handleVerifyOtp}>
               <button type="button" className="back-btn" onClick={() => setStep('email')}><ArrowLeft size={14} /> Back</button>
               <div className="header">
-                <h1>Verify Code</h1>
-                <p>Enter the 6-digit code sent to {email}</p>
+                <h1>Check your email</h1>
+                <p>We've sent a magic link and a 6-digit code to {email}</p>
               </div>
               <div className="input-group">
                 <input
@@ -182,11 +448,63 @@ function App() {
                   style={{ textAlign: 'center', fontSize: '1.5rem', letterSpacing: '0.5rem' }}
                   required
                 />
-                {debugOtp && <div className="debug-hint" style={{ fontSize: '0.8rem', color: 'var(--primary)', marginTop: '0.5rem' }}>Debug Code: {debugOtp}</div>}
               </div>
-              {error && <div className="error-message" style={{ marginTop: '1rem', marginBottom: '1rem' }}><AlertCircle size={14} /> {error}</div>}
               <button type="submit" className="btn" disabled={loading || otp.length < 6}>
-                {loading ? <div className="loading-spinner" /> : 'Verify & Sign In'}
+                {loading ? <div className="loading-spinner" /> : 'Verify Code'}
+              </button>
+              <p className="hint">Tip: Clicking the link in your email is faster!</p>
+            </form>
+            {error && <div className="error-message" style={{ marginTop: '1rem' }}><AlertCircle size={14} /> {error}</div>}
+          </div>
+        )}
+
+        {step === 'onboarding' && (
+          <div className="auth-step-container">
+            <form onSubmit={handleOnboardingSubmit}>
+              <div className="header">
+                <h1>Last step!</h1>
+                <p>Tell us a bit about yourself</p>
+              </div>
+              <div className="input-group">
+                <label className="input-label">Full Name</label>
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="John Doe"
+                  value={onboardingData.name}
+                  onChange={(e) => setOnboardingData({...onboardingData, name: e.target.value})}
+                  required
+                />
+              </div>
+
+              {!email && !user?.email && (
+                <div className="input-group">
+                  <label className="input-label">Verify Email</label>
+                  <input
+                    type="email"
+                    className="input-field"
+                    placeholder="name@edmitted.org"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                  />
+                </div>
+              )}
+              <div className="input-group">
+                <label className="input-label">I am a...</label>
+                <div className="role-selector">
+                  <div className={`role-option ${onboardingData.role === 'student' ? 'active' : ''}`} onClick={() => setOnboardingData({...onboardingData, role: 'student'})}>
+                    <GraduationCap size={24} />
+                    <span>Student</span>
+                  </div>
+                  <div className={`role-option ${onboardingData.role === 'mentor' ? 'active' : ''}`} onClick={() => setOnboardingData({...onboardingData, role: 'mentor'})}>
+                    <Users size={24} />
+                    <span>Mentor</span>
+                  </div>
+                </div>
+              </div>
+              <button type="submit" className="btn" disabled={loading}>
+                {loading ? <div className="loading-spinner" /> : 'Start Exploring'}
               </button>
             </form>
           </div>
@@ -195,13 +513,33 @@ function App() {
         {step === 'success' && (
           <div className="success-state">
             <div className="user-profile">
-              {user?.picture ? <img src={user.picture} alt="Profile" className="profile-img" /> : <div className="profile-placeholder"><UserIcon size={32} /></div>}
+              <div className="profile-placeholder"><UserIcon size={32} /></div>
               <div className="status-badge"><CheckCircle2 size={16} /></div>
             </div>
             <div className="header">
-              <h1>Welcome back!</h1>
-              <p>Redirecting you to <strong>edmitted.org</strong>...</p>
+              <h1>Welcome back, {user?.name}!</h1>
+              <p>You are logged in as a <strong>{user?.role || 'user'}</strong>.</p>
             </div>
+            
+            <div className="redirect-notice" style={{ margin: '1rem 0', padding: '10px', background: '#f0fdf4', borderRadius: '8px', color: '#16a34a', fontSize: '0.9rem' }}>
+              <CheckCircle2 size={16} style={{ verticalAlign: 'middle', marginRight: '5px' }} /> 
+              Authentication Complete. Redirecting to Edmitted...
+            </div>
+
+            {!hasPasskey && (
+              <button className="btn btn-passkey" onClick={handleRegisterPasskey} disabled={loading} style={{ marginBottom: '1rem' }}>
+                <Fingerprint size={18} /> Enable Passkey Login
+              </button>
+            )}
+
+            <button className="btn" onClick={() => window.location.href = "https://edmitted.org"} style={{ marginBottom: '1rem', background: '#6366f1' }}>
+              <ArrowRight size={18} /> Enter Dashboard
+            </button>
+
+            <button className="btn btn-secondary" onClick={handleLogout}>
+              <LogOut size={18} /> Sign Out
+            </button>
+            {error && <div className="error-message" style={{ marginTop: '1rem' }}><AlertCircle size={14} /> {error}</div>}
           </div>
         )}
       </div>

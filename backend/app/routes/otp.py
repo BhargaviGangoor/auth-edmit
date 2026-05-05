@@ -1,59 +1,74 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Request, BackgroundTasks
+from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.services.otp_service import OTPService
 from app.services.auth_service import AuthService
 
 from app.services.email_service import email_service
+from app.services.captcha_service import CaptchaService
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from fastapi import Request, BackgroundTasks
 import os
+
+limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/otp", tags=["OTP Auth"])
 
-@router.post("/send-otp")
-async def send_otp(email: str = Body(..., embed=True), db: Session = Depends(get_db)):
-    """Generate and send an OTP to the user's email via SendGrid."""
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
-    
-    # Generate and store OTP
-    otp = OTPService.create_otp(db, email)
-    
-    # Send real email via SendGrid
-    success = email_service.send_otp_email(email, otp)
-    
-    if not success:
-        # If email fails, we still return the OTP in development so testing doesn't break
-        if os.getenv("APP_MODE") != "production":
-            return {
-                "success": False,
-                "message": "Failed to send email, but here is your code for testing.",
-                "otp_test": otp
-            }
-        raise HTTPException(status_code=500, detail="Failed to send authentication email.")
+class SendOTPRequest(BaseModel):
+    email: str
+    captcha_token: str = None
 
+class VerifyOTPRequest(BaseModel):
+    email: str
+    otp: str
+
+@router.post("/send-otp")
+@limiter.limit("5/minute")
+async def send_otp(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    payload: SendOTPRequest,
+    db: Session = Depends(get_db)
+):
+    """Generate and send an OTP + Magic Link to the user's email."""
+    print(f"Incoming payload: {payload.dict()}")
+    email = payload.email
+    captcha_token = payload.captcha_token
+    
+    # 1. Verify Captcha
+    if not CaptchaService.verify_turnstile_token(captcha_token):
+        raise HTTPException(status_code=400, detail="Captcha verification failed")
+    
+    # 2. Generate OTP and Magic Token
+    otp, magic_token = OTPService.create_otp(db, email)
+    
+    # 3. Send email in background
+    background_tasks.add_task(email_service.send_otp_email, email, otp, magic_token)
+    
     response = {
         "success": True,
-        "message": f"OTP sent to {email}"
+        "message": f"Login link and code sent to {email}"
     }
 
-    # Only include the OTP in the response if we are in development mode
     if os.getenv("APP_MODE") != "production":
         response["otp_test"] = otp
+        response["magic_token_test"] = magic_token
 
     return response
 
 @router.post("/verify-otp")
 async def verify_otp(
-    email: str = Body(..., embed=True), 
-    otp: str = Body(..., embed=True), 
+    payload: VerifyOTPRequest,
     db: Session = Depends(get_db)
 ):
-    """Verify the OTP and return a session token/user data."""
-    is_valid = OTPService.validate_otp(db, email, otp)
+    """Verify the OTP and return JWT tokens + user data."""
+    is_valid = OTPService.validate_otp(db, payload.email, payload.otp)
     if not is_valid:
         raise HTTPException(status_code=401, detail="Invalid or expired OTP")
     
     # Get or create local user
-    user = AuthService.get_or_create_user(db, email)
+    user, is_new = AuthService.get_or_create_user(db, payload.email)
     
-    return AuthService.unified_auth_response(user, method="otp")
+    return AuthService.unified_auth_response(user, method="otp", is_new=is_new)

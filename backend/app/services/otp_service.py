@@ -1,8 +1,10 @@
 import random
 import string
 import hashlib
+from typing import Optional
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+import uuid
 from app.models.otp import OTPCode
 from app.models.user import User
 
@@ -23,10 +25,10 @@ class OTPService:
         return hashlib.sha256(otp.encode()).hexdigest() == hashed_otp
 
     @staticmethod
-    def create_otp(db: Session, email: str) -> str:
+    def create_otp(db: Session, email: str) -> tuple[str, str]:
         """
-        Create a new OTP, invalidate previous ones for this email, 
-        and return the plain text OTP.
+        Create a new OTP and Magic Token, invalidate previous ones, 
+        and return (plain_otp, plain_magic_token).
         """
         # Invalidate previous unused OTPs for this email
         db.query(OTPCode).filter(
@@ -36,16 +38,37 @@ class OTPService:
 
         otp = OTPService.generate_otp()
         otp_hash = OTPService.hash_otp(otp)
+        
+        magic_token = str(uuid.uuid4())
+        magic_token_hash = hashlib.sha256(magic_token.encode()).hexdigest()
+
         expires_at = datetime.utcnow() + timedelta(minutes=5)
 
         new_otp = OTPCode(
             email=email,
             otp_hash=otp_hash,
+            magic_token_hash=magic_token_hash,
             expires_at=expires_at
         )
         db.add(new_otp)
         db.commit()
-        return otp
+        return otp, magic_token
+
+    @staticmethod
+    def validate_magic_token(db: Session, token: str) -> Optional[str]:
+        """Validate magic token and return user email if valid."""
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        otp_record = db.query(OTPCode).filter(
+            OTPCode.magic_token_hash == token_hash,
+            OTPCode.is_used == False,
+            OTPCode.expires_at > datetime.utcnow()
+        ).first()
+
+        if otp_record:
+            otp_record.is_used = True
+            db.commit()
+            return otp_record.email
+        return None
 
     @staticmethod
     def validate_otp(db: Session, email: str, otp: str) -> bool:
