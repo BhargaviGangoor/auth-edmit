@@ -21,6 +21,22 @@ A premium, passwordless authentication platform featuring **Email OTP**, **Googl
 
 ---
 
+## 📸 Visual Documentation (Project Outputs)
+
+| Login Interface | Google Authentication |
+|:---:|:---:|
+| ![Login Page](./login%20page.png) | ![Google Login](./login%20with%20google%20page.png) |
+
+| Email OTP Verification | Biometric Passkey Login |
+|:---:|:---:|
+| ![OTP Page](./otp%20page.png) | ![Passkey Login](./passkey%20login.png) |
+
+| Success & Redirection |
+|:---:|
+| ![Success Page](./success%20page.png) |
+
+---
+
 ## 🛠️ Advanced Passkey Features
 
 - **Conditional UI Support**: Implemented `mediation: 'conditional'` allowing browsers to provide passkey suggestions directly in the email input field.
